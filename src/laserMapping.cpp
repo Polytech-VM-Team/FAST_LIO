@@ -92,7 +92,8 @@ condition_variable sig_buffer;
 string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic;
 string output_world_frame = "odom";
-string output_lio_body_frame = "lidar_imu_link";
+string output_body_frame = "base_footprint";
+string imu_frame = "lidar_imu_link";
 string lidar_frame = "lidar_link";
 
 double res_mean_last = 0.05, total_residual = 0.0;
@@ -134,6 +135,8 @@ V3D euler_cur;
 V3D position_last(Zero3d);
 V3D Lidar_T_wrt_IMU(Zero3d);
 M3D Lidar_R_wrt_IMU(Eye3d);
+V3D Body_T_wrt_IMU(Zero3d);
+M3D Body_R_wrt_IMU(Eye3d);
 
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
@@ -229,14 +232,27 @@ void RGBpointBodyLidarToIMU(PointType const * const pi, PointType * const po)
     po->intensity = pi->intensity;
 }
 
-void RGBpointWorldToIMU(PointType const * const pi, PointType * const po)
+void RGBpointBodyLidarToOutputBody(PointType const * const pi, PointType * const po)
+{
+    V3D p_body_lidar(pi->x, pi->y, pi->z);
+    V3D p_body_imu(state_point.offset_R_L_I*p_body_lidar + state_point.offset_T_L_I);
+    V3D p_body_output(Body_R_wrt_IMU.transpose() * (p_body_imu - Body_T_wrt_IMU));
+
+    po->x = p_body_output(0);
+    po->y = p_body_output(1);
+    po->z = p_body_output(2);
+    po->intensity = pi->intensity;
+}
+
+void RGBpointWorldToOutputBody(PointType const * const pi, PointType * const po)
 {
     V3D p_world(pi->x, pi->y, pi->z);
     V3D p_body_imu(state_point.rot.inverse() * (p_world - state_point.pos));
+    V3D p_body_output(Body_R_wrt_IMU.transpose() * (p_body_imu - Body_T_wrt_IMU));
 
-    po->x = p_body_imu(0);
-    po->y = p_body_imu(1);
-    po->z = p_body_imu(2);
+    po->x = p_body_output(0);
+    po->y = p_body_output(1);
+    po->z = p_body_output(2);
     po->intensity = pi->intensity;
 }
 
@@ -510,14 +526,14 @@ void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shared
 
     for (int i = 0; i < size; i++)
     {
-        RGBpointBodyLidarToIMU(&feats_undistort->points[i], \
+        RGBpointBodyLidarToOutputBody(&feats_undistort->points[i], \
                             &laserCloudIMUBody->points[i]);
     }
 
     sensor_msgs::msg::PointCloud2 laserCloudmsg;
     pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
     laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudmsg.header.frame_id = output_lio_body_frame;
+    laserCloudmsg.header.frame_id = output_body_frame;
     pubLaserCloudFull_body->publish(laserCloudmsg);
     publish_count -= PUBFRAME_PERIOD;
 }
@@ -555,14 +571,14 @@ void publish_map(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub
     PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(pcl_wait_pub->points.size(), 1));
     for (size_t i = 0; i < pcl_wait_pub->points.size(); i++)
     {
-        RGBpointWorldToIMU(&pcl_wait_pub->points[i], &laserCloudIMUBody->points[i]);
+        RGBpointWorldToOutputBody(&pcl_wait_pub->points[i], &laserCloudIMUBody->points[i]);
     }
 
     sensor_msgs::msg::PointCloud2 laserCloudmsg;
     pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
     // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
     laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudmsg.header.frame_id = output_lio_body_frame;
+    laserCloudmsg.header.frame_id = output_body_frame;
     pubLaserCloudMap->publish(laserCloudmsg);
 
     // sensor_msgs::msg::PointCloud2 laserCloudMap;
@@ -581,20 +597,25 @@ void save_to_pcd()
 template<typename T>
 void set_posestamp(T & out)
 {
-    out.pose.position.x = state_point.pos(0);
-    out.pose.position.y = state_point.pos(1);
-    out.pose.position.z = state_point.pos(2);
-    out.pose.orientation.x = geoQuat.x;
-    out.pose.orientation.y = geoQuat.y;
-    out.pose.orientation.z = geoQuat.z;
-    out.pose.orientation.w = geoQuat.w;
+    V3D body_pos_lio = state_point.pos + state_point.rot * Body_T_wrt_IMU;
+    V3D body_pos = Body_R_wrt_IMU.transpose() * (body_pos_lio - Body_T_wrt_IMU);
+    Eigen::Quaterniond body_quat(
+        Body_R_wrt_IMU.transpose() * state_point.rot.toRotationMatrix() * Body_R_wrt_IMU);
+
+    out.pose.position.x = body_pos(0);
+    out.pose.position.y = body_pos(1);
+    out.pose.position.z = body_pos(2);
+    out.pose.orientation.x = body_quat.x();
+    out.pose.orientation.y = body_quat.y();
+    out.pose.orientation.z = body_quat.z();
+    out.pose.orientation.w = body_quat.w();
     
 }
 
 void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped)
 {
     odomAftMapped.header.frame_id = output_world_frame;
-    odomAftMapped.child_frame_id = output_lio_body_frame;
+    odomAftMapped.child_frame_id = output_body_frame;
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
     auto P = kf.get_P();
@@ -785,6 +806,7 @@ public:
         this->declare_parameter<bool>("pcd_save.pcd_save_en", false);
         this->declare_parameter<int>("pcd_save.interval", -1);
         this->declare_parameter<string>("output.world_frame", "odom");
+        this->declare_parameter<string>("output.body_frame", "base_footprint");
         this->declare_parameter<string>("imu_frame", "lidar_imu_link");
         this->declare_parameter<string>("lidar_frame", "lidar_link");
 
@@ -822,7 +844,8 @@ public:
         this->get_parameter_or<bool>("pcd_save.pcd_save_en", pcd_save_en, false);
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
         this->get_parameter_or<string>("output.world_frame", output_world_frame, "odom");
-        this->get_parameter_or<string>("imu_frame", output_lio_body_frame, "lidar_imu_link");
+        this->get_parameter_or<string>("output.body_frame", output_body_frame, "base_footprint");
+        this->get_parameter_or<string>("imu_frame", imu_frame, "lidar_imu_link");
         this->get_parameter_or<string>("lidar_frame", lidar_frame, "lidar_link");
 
         RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
@@ -849,10 +872,16 @@ public:
 
         load_transform_from_tf(
             lidar_frame,
-            output_lio_body_frame,
+            imu_frame,
             Lidar_T_wrt_IMU,
             Lidar_R_wrt_IMU,
             "lidar extrinsic");
+        load_transform_from_tf(
+            output_body_frame,
+            imu_frame,
+            Body_T_wrt_IMU,
+            Body_R_wrt_IMU,
+            "output body extrinsic");
 
         p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
         p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
