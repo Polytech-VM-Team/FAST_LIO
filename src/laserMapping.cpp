@@ -567,8 +567,24 @@ PointCloudXYZI::Ptr prepare_local_map()
 
 PointCloudXYZI build_ground_input(PointCloudXYZI::Ptr localMap)
 {
+    PointCloudXYZI::Ptr scanInput = feats_undistort;
+
+    if (map_publish_size > 0.0)
+    {
+        scanInput.reset(new PointCloudXYZI());
+
+        const float half_map_size = static_cast<float>(map_publish_size / 2.0);
+        const float z_limit = std::numeric_limits<float>::max();
+
+        pcl::CropBox<PointType> cropFilter;
+        cropFilter.setInputCloud(feats_undistort);
+        cropFilter.setMin(Eigen::Vector4f(-half_map_size, -half_map_size, -z_limit, 1.0F));
+        cropFilter.setMax(Eigen::Vector4f(half_map_size, half_map_size, z_limit, 1.0F));
+        cropFilter.filter(*scanInput);
+    }
+
     PointCloudXYZI groundInput = *localMap;
-    groundInput += *feats_undistort;
+    groundInput += *scanInput;
     return groundInput;
 }
 
