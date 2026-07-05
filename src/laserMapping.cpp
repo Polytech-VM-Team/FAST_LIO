@@ -95,6 +95,7 @@ string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic;
 string output_world_frame = "odom";
 string output_body_frame = "base_footprint";
+string output_cloud_frame = "lidar_link";
 string imu_frame = "lidar_imu_link";
 string lidar_frame = "lidar_link";
 
@@ -141,6 +142,8 @@ V3D Lidar_T_wrt_IMU(Zero3d);
 M3D Lidar_R_wrt_IMU(Eye3d);
 V3D Body_T_wrt_IMU(Zero3d);
 M3D Body_R_wrt_IMU(Eye3d);
+V3D OutputCloud_T_wrt_Lidar(Zero3d);
+M3D OutputCloud_R_wrt_Lidar(Eye3d);
 
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
@@ -248,6 +251,26 @@ void RGBpointBodyLidarToWorld(PointType const * const pi, PointType * const po)
     po->y = p_world(1);
     po->z = p_world(2);
     po->intensity = pi->intensity;
+}
+
+PointCloudXYZI::Ptr cloudToOutputCloudFrame(const PointCloudXYZI &cloud)
+{
+    PointCloudXYZI::Ptr output(new PointCloudXYZI(cloud));
+    if (output_cloud_frame == lidar_frame)
+    {
+        return output;
+    }
+
+    for (auto &point : output->points)
+    {
+        V3D p_lidar(point.x, point.y, point.z);
+        V3D p_output = OutputCloud_R_wrt_Lidar * p_lidar + OutputCloud_T_wrt_Lidar;
+        point.x = p_output(0);
+        point.y = p_output(1);
+        point.z = p_output(2);
+    }
+
+    return output;
 }
 
 void points_cache_collect()
@@ -590,10 +613,12 @@ PointCloudXYZI build_ground_input(PointCloudXYZI::Ptr localMap)
 
 void publish_lidar_cloud(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubRegisteredBody)
 {
+    PointCloudXYZI::Ptr outputCloud = cloudToOutputCloudFrame(*feats_undistort);
+
     sensor_msgs::msg::PointCloud2 laserCloudmsg;
-    pcl::toROSMsg(*feats_undistort, laserCloudmsg);
+    pcl::toROSMsg(*outputCloud, laserCloudmsg);
     laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudmsg.header.frame_id = lidar_frame;
+    laserCloudmsg.header.frame_id = output_cloud_frame;
     pubRegisteredBody->publish(laserCloudmsg);
     publish_count -= PUBFRAME_PERIOD;
 }
@@ -619,19 +644,22 @@ void publish_local_clouds(
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubGroundSegmentationInput)
 {
     PointCloudXYZI::Ptr localMapOutput = prepare_local_map();
+    PointCloudXYZI::Ptr outputLocalMap = cloudToOutputCloudFrame(*localMapOutput);
 
     sensor_msgs::msg::PointCloud2 laserCloudmsg;
-    pcl::toROSMsg(*localMapOutput, laserCloudmsg);
+    pcl::toROSMsg(*outputLocalMap, laserCloudmsg);
     laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudmsg.header.frame_id = lidar_frame;
+    laserCloudmsg.header.frame_id = output_cloud_frame;
     pubLocalMap->publish(laserCloudmsg);
 
     PointCloudXYZI groundSegmentationInput = build_ground_input(localMapOutput);
+    PointCloudXYZI::Ptr outputGroundSegmentationInput =
+        cloudToOutputCloudFrame(groundSegmentationInput);
 
     sensor_msgs::msg::PointCloud2 groundSegmentationInputMsg;
-    pcl::toROSMsg(groundSegmentationInput, groundSegmentationInputMsg);
+    pcl::toROSMsg(*outputGroundSegmentationInput, groundSegmentationInputMsg);
     groundSegmentationInputMsg.header.stamp = get_ros_time(lidar_end_time);
-    groundSegmentationInputMsg.header.frame_id = lidar_frame;
+    groundSegmentationInputMsg.header.frame_id = output_cloud_frame;
     pubGroundSegmentationInput->publish(groundSegmentationInputMsg);
 }
 
@@ -855,6 +883,7 @@ public:
         this->declare_parameter<int>("pcd_save.interval", -1);
         this->declare_parameter<string>("output.world_frame", "odom");
         this->declare_parameter<string>("output.body_frame", "base_footprint");
+        this->declare_parameter<string>("output.cloud_frame", "lidar_link");
         this->declare_parameter<string>("imu_frame", "lidar_imu_link");
         this->declare_parameter<string>("lidar_frame", "lidar_link");
 
@@ -894,6 +923,7 @@ public:
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
         this->get_parameter_or<string>("output.world_frame", output_world_frame, "odom");
         this->get_parameter_or<string>("output.body_frame", output_body_frame, "base_footprint");
+        this->get_parameter_or<string>("output.cloud_frame", output_cloud_frame, "lidar_link");
         this->get_parameter_or<string>("imu_frame", imu_frame, "lidar_imu_link");
         this->get_parameter_or<string>("lidar_frame", lidar_frame, "lidar_link");
 
@@ -931,6 +961,12 @@ public:
             Body_T_wrt_IMU,
             Body_R_wrt_IMU,
             "output body extrinsic");
+        load_transform_from_tf(
+            lidar_frame,
+            output_cloud_frame,
+            OutputCloud_T_wrt_Lidar,
+            OutputCloud_R_wrt_Lidar,
+            "output cloud transform");
 
         p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
         p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
