@@ -106,6 +106,10 @@ double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min
 double map_publish_size = 40.0;
 double map_publish_leaf_size_xy = 0.25;
 double map_publish_leaf_size_z = 0.25;
+bool self_filter_enabled = false;
+double self_filter_min_x = -0.8, self_filter_max_x = 0.8;
+double self_filter_min_y = -0.7, self_filter_max_y = 0.7;
+double self_filter_min_z = -0.1, self_filter_max_z = 0.8;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
@@ -145,6 +149,9 @@ V3D Body_T_wrt_IMU(Zero3d);
 M3D Body_R_wrt_IMU(Eye3d);
 V3D OutputCloud_T_wrt_Lidar(Zero3d);
 M3D OutputCloud_R_wrt_Lidar(Eye3d);
+V3D SelfFilter_T_wrt_Lidar(Zero3d);
+M3D SelfFilter_R_wrt_Lidar(Eye3d);
+Eigen::Affine3f LidarToBody(Eigen::Affine3f::Identity());
 
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
@@ -272,6 +279,26 @@ PointCloudXYZI::Ptr cloudToOutputCloudFrame(const PointCloudXYZI &cloud)
     }
 
     return output;
+}
+
+void filterRobotPoints(PointCloudXYZI::Ptr cloud)
+{
+    if (!self_filter_enabled || cloud == nullptr || cloud->empty())
+    {
+        return;
+    }
+
+    PointCloudXYZI::Ptr filtered(new PointCloudXYZI());
+    pcl::CropBox<PointType> cropFilter;
+    cropFilter.setInputCloud(cloud);
+    cropFilter.setTransform(LidarToBody);
+    cropFilter.setMin(Eigen::Vector4f(
+        self_filter_min_x, self_filter_min_y, self_filter_min_z, 1.0F));
+    cropFilter.setMax(Eigen::Vector4f(
+        self_filter_max_x, self_filter_max_y, self_filter_max_z, 1.0F));
+    cropFilter.setNegative(true);
+    cropFilter.filter(*filtered);
+    cloud->swap(*filtered);
 }
 
 void points_cache_collect()
@@ -854,6 +881,13 @@ public:
         this->declare_parameter<string>("output.cloud_frame", "lidar_link");
         this->declare_parameter<string>("imu_frame", "lidar_imu_link");
         this->declare_parameter<string>("lidar_frame", "lidar_link");
+        this->declare_parameter<bool>("self_filter.enabled", false);
+        this->declare_parameter<double>("self_filter.min_x", -0.8);
+        this->declare_parameter<double>("self_filter.max_x", 0.8);
+        this->declare_parameter<double>("self_filter.min_y", -0.7);
+        this->declare_parameter<double>("self_filter.max_y", 0.7);
+        this->declare_parameter<double>("self_filter.min_z", -0.1);
+        this->declare_parameter<double>("self_filter.max_z", 0.8);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
         this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
@@ -895,6 +929,13 @@ public:
         this->get_parameter_or<string>("output.cloud_frame", output_cloud_frame, "lidar_link");
         this->get_parameter_or<string>("imu_frame", imu_frame, "lidar_imu_link");
         this->get_parameter_or<string>("lidar_frame", lidar_frame, "lidar_link");
+        this->get_parameter_or<bool>("self_filter.enabled", self_filter_enabled, false);
+        this->get_parameter_or<double>("self_filter.min_x", self_filter_min_x, -0.8);
+        this->get_parameter_or<double>("self_filter.max_x", self_filter_max_x, 0.8);
+        this->get_parameter_or<double>("self_filter.min_y", self_filter_min_y, -0.7);
+        this->get_parameter_or<double>("self_filter.max_y", self_filter_max_y, 0.7);
+        this->get_parameter_or<double>("self_filter.min_z", self_filter_min_z, -0.1);
+        this->get_parameter_or<double>("self_filter.max_z", self_filter_max_z, 0.8);
 
         RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
@@ -936,6 +977,14 @@ public:
             OutputCloud_T_wrt_Lidar,
             OutputCloud_R_wrt_Lidar,
             "output cloud transform");
+        load_transform_from_tf(
+            lidar_frame,
+            output_body_frame,
+            SelfFilter_T_wrt_Lidar,
+            SelfFilter_R_wrt_Lidar,
+            "self filter transform");
+        LidarToBody.linear() = SelfFilter_R_wrt_Lidar.cast<float>();
+        LidarToBody.translation() = SelfFilter_T_wrt_Lidar.cast<float>();
 
         p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
         p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
@@ -1080,6 +1129,7 @@ private:
             p_imu->Process(Measures, kf, feats_undistort);
             state_point = kf.get_x();
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+            filterRobotPoints(feats_undistort);
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
