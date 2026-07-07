@@ -565,58 +565,6 @@ void map_incremental()
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
 PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
 
-PointCloudXYZI::Ptr prepare_local_map()
-{
-    PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(feats_undistort->points.size(), 1));
-    for (size_t i = 0; i < feats_undistort->points.size(); i++)
-    {
-        RGBpointBodyToWorld(&feats_undistort->points[i], &laserCloudWorld->points[i]);
-    }
-    *pcl_wait_pub += *laserCloudWorld;
-
-    PointCloudXYZI::Ptr mapOutput(new PointCloudXYZI(pcl_wait_pub->points.size(), 1));
-    for (size_t i = 0; i < pcl_wait_pub->points.size(); i++)
-    {
-        RGBpointWorldToBodyLidar(&pcl_wait_pub->points[i], &mapOutput->points[i]);
-    }
-
-    PointCloudXYZI::Ptr localMap = mapOutput;
-
-    if (map_publish_size > 0.0)
-    {
-        PointCloudXYZI::Ptr croppedMap(new PointCloudXYZI());
-        const float half_map_size = static_cast<float>(map_publish_size / 2.0);
-        const float z_limit = std::numeric_limits<float>::max();
-
-        pcl::CropBox<PointType> cropFilter;
-        cropFilter.setInputCloud(localMap);
-        cropFilter.setMin(Eigen::Vector4f(-half_map_size, -half_map_size, -z_limit, 1.0F));
-        cropFilter.setMax(Eigen::Vector4f(half_map_size, half_map_size, z_limit, 1.0F));
-        cropFilter.filter(*croppedMap);
-        localMap = croppedMap;
-    }
-
-    if (map_publish_leaf_size_z > 0.0 && map_publish_leaf_size_xy > 0.0)
-    {
-        PointCloudXYZI::Ptr filteredMap(new PointCloudXYZI());
-        pcl::VoxelGrid<PointType> mapPublishFilter;
-        mapPublishFilter.setLeafSize(
-            map_publish_leaf_size_xy, map_publish_leaf_size_xy, map_publish_leaf_size_z);
-        mapPublishFilter.setInputCloud(localMap);
-        mapPublishFilter.filter(*filteredMap);
-        localMap = filteredMap;
-    }
-
-    PointCloudXYZI::Ptr localMapWorld(new PointCloudXYZI(localMap->points.size(), 1));
-    for (size_t i = 0; i < localMap->points.size(); i++)
-    {
-        RGBpointBodyLidarToWorld(&localMap->points[i], &localMapWorld->points[i]);
-    }
-    pcl_wait_pub = localMapWorld;
-
-    return localMap;
-}
-
 void publish_lidar_cloud(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubRegisteredBody)
 {
     PointCloudXYZI::Ptr outputCloud = cloudToOutputCloudFrame(*feats_undistort);
@@ -647,11 +595,7 @@ void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shar
 
 void publish_local_clouds(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLocalMap)
 {
-    PointCloudXYZI::Ptr localMapOutput = prepare_local_map();
-    PointCloudXYZI::Ptr outputLocalMap = cloudToOutputCloudFrame(*localMapOutput);
-
     sensor_msgs::msg::PointCloud2 laserCloudmsg;
-    pcl::toROSMsg(*outputLocalMap, laserCloudmsg);
     laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
     laserCloudmsg.header.frame_id = output_cloud_frame;
     pubLocalMap->publish(laserCloudmsg);
