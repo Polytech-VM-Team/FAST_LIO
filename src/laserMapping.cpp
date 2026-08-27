@@ -631,6 +631,42 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
         odomAftMapped.pose.covariance[i*6 + 4] = P(k, 1);
         odomAftMapped.pose.covariance[i*6 + 5] = P(k, 2);
     }
+
+    // state_point.vel is the IMU-origin velocity expressed in FAST-LIO's world frame,
+    // while nav_msgs/Odometry requires twist to be expressed in child_frame_id. Rotate
+    // it into the configured output body frame before publishing it.
+    const M3D velocity_world_to_body =
+        Body_R_wrt_IMU.transpose() * state_point.rot.toRotationMatrix().transpose();
+    const V3D body_velocity = velocity_world_to_body * state_point.vel;
+    odomAftMapped.twist.twist.linear.x = body_velocity(0);
+    odomAftMapped.twist.twist.linear.y = body_velocity(1);
+    odomAftMapped.twist.twist.linear.z = body_velocity(2);
+
+    odomAftMapped.twist.twist.angular.x = 0.0;
+    odomAftMapped.twist.twist.angular.y = 0.0;
+    odomAftMapped.twist.twist.angular.z = 0.0;
+    odomAftMapped.twist.covariance.fill(0.0);
+
+    constexpr int velocity_state_index = 12;
+    const M3D body_velocity_covariance =
+        velocity_world_to_body *
+        P.block<3, 3>(velocity_state_index, velocity_state_index) *
+        velocity_world_to_body.transpose();
+    for (int row = 0; row < 3; ++row)
+    {
+        for (int column = 0; column < 3; ++column)
+        {
+            odomAftMapped.twist.covariance[row * 6 + column] =
+                body_velocity_covariance(row, column);
+        }
+    }
+
+    // Angular velocity is not part of the FAST-LIO state published here. Mark it as
+    // unknown so downstream filters cannot accidentally treat the zero values as exact.
+    constexpr double unknown_angular_velocity_variance = 1e6;
+    odomAftMapped.twist.covariance[21] = unknown_angular_velocity_variance;
+    odomAftMapped.twist.covariance[28] = unknown_angular_velocity_variance;
+    odomAftMapped.twist.covariance[35] = unknown_angular_velocity_variance;
     pubOdomAftMapped->publish(odomAftMapped);
 }
 
